@@ -1,0 +1,46 @@
+# 路径相对于本文件。所有坐标取自实车预建地图，单位 m、rad。复制此文件后填写。
+map: ../pi_ws/maps/official_reference/field.yaml
+start_region: [2.42, 0.60, 3.02, 1.40]     # 老师 PDF 图坐标，单位米
+initial_pose: null         # 仅未设置 start_region 时使用 [x, y, yaw]
+start_heading_rad: null     # 手动面向 START 码，雷达估计车头朝向
+laser_mount: [0.13, 0.0, 0.0, 0.0, 0.0, 0.0]          # [x, y, z, roll, pitch, yaw] 相对 base_link；由 nav.launch.py 发布一次
+empty_scan_stop_m: 0.10    # 雷达精对准阶段的近障距离，从空车车心量起
+radius_empty_m: 0.195      # 绕轮组中心旋转的最远车角
+radius_loaded_m: null      # 从车体外接圆、货架外形与 load_center_m 自动计算
+destination_bounds: [0.0, 0.30, 0.80, 1.70]  # 官方图坐标
+# [雷达角度下限°,上限°,量程下限 m,上限 m]，只屏蔽当前装配随车出现的窄窗。
+scan_body_padding_m: 0.01  # 从矩形车身边界向外量，四角按圆弧计算
+scan_echo_windows: [[104.0, 112.0, 0.095, 0.127], [-152.0, -141.5, 0.158, 0.218]]
+scan_neighbor_gap_m: 0.03  # 邻束距离容差的起始值，随距离增加，上限 0.10 m
+scan_mask_box_m: [0.082, -0.114, 0.098, -0.093]  # 车体坐标，车身右缘最近一簇 [xmin,ymin,xmax,ymax]
+base_size_m: [0.28, 0.19] # 车高 0.18 m；此处为平面长宽
+rack_size_m: [0.14, 0.38] # 与黄区相同；从短边进架，长边横向
+leg_spacing_m: null       # 留空由多视角雷达估计
+body_center_x_m: 0.03      # 28 cm 车身的几何中心相对轮组中心：前缘 +0.17，后缘 -0.11
+# 车角及现有侧边线束回波窗口的保守包络（车体坐标，米）。
+empty_footprint_m: [[-0.11,-0.095],[-0.065,-0.14],[0.10,-0.14],[0.17,-0.095],[0.17,0.095],[0.108,0.13],[0.062,0.13],[-0.11,0.095]]
+load_center_m: [-0.005, 0.0] # 托板与车尾齐平，21 × 19 cm；按货架居中承载
+qr_posts: [[2.49, 0.67, 0.08], [0.70, 0.40, 0.08]] # 根据红框估计的 START/END 参考中心与避让半径（米），实时雷达继续避障
+# qr_post_shift_m: [0.0, 0.0]  # 可选，给雷达可能看不到的 START、END 柱额外预留摆放范围
+end_approach: [1.02, 0.90, -2.13]         # 最后一架退出后空车读 END 的停车位 [x,y,yaw]
+retreat_m: null            # 留空按托板偏移和车架外形计算
+servo_id: 1  # 采用随包键盘脚本默认 S1
+lift_up_deg: 130
+lift_down_deg: 30
+servo_speed_deg_s: 20
+lift_policy: timed      # operator: 现场确认；timed: 按舵机行程与限速自动等待
+up_wait_s: null            # 留空按固件指令行程计算
+down_wait_s: null
+# 预靠和补扫位由固定架位生成；max_insert_m 留空由预靠几何计算，opening_m 留空由当前雷达通道复核。
+# 按实际搬运顺序排列。rack_hint 是原场固定架位；approach 为预靠点；slot 是预先锁定的车体放货位姿 [x,y,yaw]。
+# 官方绿区的赛前候选车体位姿，须用实测载架外形和实际柱位复核。
+drop_policy: fixed
+# P1 → P2 → P3 → P4。按各原场架位的实际二维码替换占位码。
+path_mode: straight
+centerline: {y: 0.955, entry_x: 2.10, end_x: 1.02}  # 两排架体内边 0.730 m 和 1.180 m 的中点
+# 当前实体场地：架位行相对 PDF 尺寸图上下对调，搜索中心仍须雷达复核。
+racks:
+  - {code: RACKA_XXXX, rack_hint: [1.13, 0.54, 3.14159265], approach: null, scan_views: [], max_insert_m: null, opening_m: null, slot: [0.28, 0.63, 1.57079633]}  # P1
+  - {code: RACKB_XXXX, rack_hint: [1.92, 0.40, 3.14159265], approach: null, scan_views: [], max_insert_m: null, opening_m: null, slot: [0.56, 1.44, 3.14159265]}  # P2
+  - {code: RACKC_XXXX, rack_hint: [1.32, 1.68, 3.14159265], approach: null, scan_views: [], max_insert_m: null, opening_m: null, slot: [0.66, 0.93, 0.0]}  # P3
+  - {code: RACKD_XXXX, rack_hint: [1.81, 1.37, 3.14159265], approach: null, scan_views: [], max_insert_m: null, opening_m: null, slot: [0.27, 1.05, -1.57079633]}  # P4

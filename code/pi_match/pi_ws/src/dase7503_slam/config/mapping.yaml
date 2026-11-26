@@ -1,0 +1,5 @@
+# Only these overrides are added to the installed slam_toolbox defaults.
+# Starting values for the small game field; validate with the real robot.
+resolution: 0.02
+minimum_travel_distance: 0.05
+minimum_travel_heading: 0.1

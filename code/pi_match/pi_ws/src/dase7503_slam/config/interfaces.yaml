@@ -1,0 +1,19 @@
+scan_topic: /scan
+odom_topic: /odom
+odom_frame: odom
+base_frame: base_link
+lidar_frame: laser_frame
+
+# This package owns the map frame; agree on this name with the navigation team.
+map_frame: map
+
+# Leave false if the chassis URDF already publishes base_frame -> lidar_frame.
+publish_lidar_tf: true
+# Measured relative to base_frame: metres and radians, never guessed zeros.
+lidar_mount:
+  x: 0.13
+  y: 0.0
+  z: 0.0
+  roll: 0.0
+  pitch: 0.0
+  yaw: 0.0

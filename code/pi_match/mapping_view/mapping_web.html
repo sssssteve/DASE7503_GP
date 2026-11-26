@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="zh-Hans">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>场地定位与比赛控制</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101c24;color:#edf2f4;font:16px system-ui;min-height:100dvh;display:flex;flex-direction:column}
+header{padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-size:21px;margin:0}.status{color:#a8dad8}main{margin:0 24px;flex:1;min-height:55vh;position:relative}
+canvas{position:absolute;width:100%;height:100%;background:#24343e;border:1px solid #506370;border-radius:10px}
+footer{padding:14px 24px;color:#c5d1d8;font-size:14px;line-height:1.65}.scan{color:#ff746e}.robot{color:#66e1d0}
+.controls{padding:0 24px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+button{background:#263a45;color:#f5f9fc;border:1px solid #617684;border-radius:6px;padding:8px 12px;font:inherit;cursor:pointer;touch-action:none}
+button:disabled{opacity:.42;cursor:default}.stop{background:#7d3034}.legs{color:#dda3ff}
+.mission{margin:0 24px 12px;padding:12px 15px;border:1px solid #506370;border-radius:9px;background:#182a33}
+.mission-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.mission h2{font-size:15px;margin:0}
+.mission p{margin:7px 0 0;color:#c5d1d8;font-size:14px}.primary{background:#245a54}
+#scan-options{margin-right:1em}#radar-caption{margin-left:.5em}
+.workspace{display:grid;grid-template-columns:minmax(0,2fr) minmax(250px,1fr);gap:14px;margin:0 24px}
+.workspace main{margin:0;min-height:50vh}.preview{align-self:start;background:#182a33;border:1px solid #506370;border-radius:10px;overflow:hidden}
+.preview h2,.preview p{margin:10px 14px}.preview h2{font-size:16px}.preview p{font-size:14px;line-height:1.5}
+.camera-screen{display:grid;place-items:center;aspect-ratio:16/9;background:#0a151b;color:#adbdc5}
+.camera-screen img{width:100%;height:100%;object-fit:contain;grid-area:1/1}.camera-screen span{grid-area:1/1}
+.workspace:has(.preview[hidden]){grid-template-columns:1fr}
+@media(max-width:720px){.workspace{grid-template-columns:1fr;margin:0 12px}.workspace main{min-height:46vh}.preview{width:100%}}
+#near-view{position:static;display:block;width:100%;height:210px;box-sizing:border-box}
+.near-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:8px 14px;font-size:14px}
+#map-source{position:absolute;z-index:1;left:10px;top:10px;background:#142029ed;color:#e3f5f0;padding:5px 9px;border-radius:5px;font-size:14px;pointer-events:none}
+</style>
+<header><h1>场地定位与控制</h1><span class="status" id="status">等待连接…</span></header>
+<section class="controls" aria-label="底盘控制">
+  <button data-op="chassis">启动底盘</button><button data-op="manual">遥控</button>
+  <button data-op="nav">点选导航</button><button data-op="stop" class="stop">停止</button>
+  <button data-op="check">复核墙面</button>
+  <button data-hold="forward">前</button><button data-hold="back">后</button>
+  <button data-hold="left">左</button><button data-hold="right">右</button>
+  <button data-op="goal" disabled>发送地图目标</button>
+  <span id="drive" role="status"></span>
+</section>
+<section class="mission" aria-label="比赛导航">
+  <div class="mission-row">
+    <h2>比赛导航</h2><button data-op="race" class="primary">开始比赛</button>
+    <button data-op="confirm" hidden>确认货架状态</button>
+    <strong id="mission-phase" role="status"></strong><span id="clock"></span>
+  </div>
+  <p id="order" hidden></p>
+  <p id="chassis" role="status"></p><p id="route-status" role="status">下一步 · 等待导航目标</p>
+</section>
+<div class="workspace"><main><span id="map-source"></span><canvas id="view" aria-label="官方场地图、车头与实时雷达回波"></canvas></main>
+<aside class="preview" id="preview" hidden><h2>车载相机</h2>
+<div class="camera-screen"><img id="camera-image" alt="车载相机实时画面" hidden><span id="camera-wait">等待相机图像</span></div>
+<p id="sensor-health"></p><p id="localization-health"></p>
+<h2>雷达近场 · 车头朝上</h2><div class="near-tools"><label><input id="show-raw" type="checkbox"> 查看原始回波</label><span id="near-caption"></span></div>
+<canvas id="near-view" aria-label="车体坐标下的实时雷达近点和过滤框"></canvas></aside></div>
+<footer><span id="scan-options" hidden><span id="radar-caption"></span><br></span>白色 · 空闲　黑色 · 障碍　灰色 · 未知　<span class="scan">红点 · 雷达</span>　<span class="robot">青色箭头 · 车头</span>　<span class="legs">紫圈 · 扫到的货架腿候选</span>　<span style="color:#80b1ff">蓝线 · 计划路径</span>　<span style="color:#ffaf72">橙虚线 · 受阻路径</span>　<span style="color:#65d7ae">绿虚线 · 定位轨迹</span>　<span id="scale"></span><br>
+<span id="pose"></span> <span id="wall"></span> <span id="racks"></span></footer>
+<script>
+const canvas = document.querySelector('#view'), ctx = canvas.getContext('2d');
+const status = document.querySelector('#status'), scaleLabel = document.querySelector('#scale');
+const layer = document.createElement('canvas'), layerCtx = layer.getContext('2d');
+let cached = null, cells = null, frame = null;
+let transform = null, target = null, hold = null, online = false;
+const commands = document.querySelectorAll('[data-op],[data-hold]');
+const drive = document.querySelector('#drive');
+const phase = document.querySelector('#mission-phase'), clock = document.querySelector('#clock');
+const order = document.querySelector('#order'), confirm = document.querySelector('[data-op="confirm"]');
+
+const officialZones = [
+    ['START',2.42,.60,.60,.80,'#9bc8f1','#173d68'],
+    ['终点区',0,.30,.80,1.40,'#a9dca8','#284f29'],
+    ['P1',1.06,1.27,.14,.38,'#ffd568','#6a4511'],
+    ['P2',1.85,1.41,.14,.38,'#ffd568','#6a4511'],
+    ['P3',1.25,.13,.14,.38,'#ffd568','#6a4511'],
+    ['P4',1.74,.44,.14,.38,'#ffd568','#6a4511'],
+];
+
+function drawOfficialZones(m, bytes, k, pixelRatio) {
+    // Match the installed reference image's grid and boundary pattern.
+    const [x,y,yaw] = m.origin;
+    if (m.width!==155 || m.height!==104 || Math.abs(m.resolution-.02)>1e-6 ||
+        Math.abs(x+.04)>1e-5 || Math.abs(y+.04)>1e-5 || Math.abs(yaw)>1e-6) return;
+    const cell = (i,j)=>bytes.charCodeAt(j*m.width+i);
+    if (cell(0,0)!==255 || cell(1,1)!==100 || cell(77,1)!==100 ||
+        cell(1,52)!==100 || cell(153,52)!==100 || cell(77,102)!==100 || cell(77,52)!==0) return;
+    const layout=frame.rack_layout || frame.field?.rack_layout;
+    for (const [label,left,bottom,w,h,fill,ink] of layout?officialZones.slice(0,2):officialZones) {
+        ctx.fillStyle=fill;ctx.fillRect(left,bottom,w,h);
+        ctx.save();ctx.translate(left+w/2,bottom+h/2);ctx.scale(1,-1);
+        ctx.fillStyle=ink;ctx.font='600 '+Math.min(.13,16*pixelRatio/k)+'px system-ui';
+        ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(label,0,0);ctx.restore();
+    }
+    for(const r of layout || []){
+        const [w,h]=r.size;
+        ctx.save();ctx.translate(...r.center);ctx.rotate(r.yaw);ctx.fillStyle='#ffd568';
+        ctx.fillRect(-w/2,-h/2,w,h);ctx.rotate(-r.yaw);ctx.scale(1,-1);
+        ctx.fillStyle='#694c18';ctx.font='600 '+Math.min(.12,16*pixelRatio/k)+'px system-ui';
+        ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(r.name,0,0);ctx.restore();
+    }
+}
+
+function drawNearField(){
+    const el=document.querySelector('#near-view'),g=el.getContext('2d'),ratio=devicePixelRatio||1;
+    if(!el.clientWidth || !el.clientHeight)return;
+    el.width=el.clientWidth*ratio;el.height=el.clientHeight*ratio;
+    const cx=el.width/2,cy=el.height/2,k=Math.min(el.width,el.height)/.68;
+    const px=y=>cx-y*k, py=x=>cy-x*k;
+    const raw=document.querySelector('#show-raw').checked, pts=(raw?frame?.raw:frame?.filtered)||[];
+    g.strokeStyle='#51646c';g.lineWidth=ratio;
+    for(const m of [.1,.2,.3]){g.beginPath();g.arc(cx,cy,m*k,0,2*Math.PI);g.stroke();}
+    const [length,width]=frame?.body_size||[.28,.19];
+    g.fillStyle='#366367';g.fillRect(px(width/2),py(length/2+(frame?.body_center_x||0)),width*k,length*k);
+    const pad=frame?.body_padding||0;
+    if(pad>0){
+        g.strokeStyle='#ffd65e';g.beginPath();
+        g.roundRect(px(width/2+pad),py(length/2+(frame?.body_center_x||0)),(width+2*pad)*k,(length+pad)*k,[0,0,pad*k,pad*k]);
+        g.stroke();
+    }
+    g.fillStyle='#78e3d5';g.beginPath();g.moveTo(cx,py(.075));g.lineTo(cx-5*ratio,cy);g.lineTo(cx+5*ratio,cy);g.fill();
+    g.fillStyle='#ff524c';
+    for(const [x,y] of pts)g.fillRect(px(y)-2*ratio,py(x)-2*ratio,4*ratio,4*ratio);
+    if(frame?.mask_box){
+        const [x0,y0,x1,y1]=frame.mask_box;
+        g.strokeStyle='#ffd65e';g.strokeRect(px(y1),py(x1),(y1-y0)*k,(x1-x0)*k);
+    }
+    g.strokeStyle='#ffd65e';
+    for(const poly of frame?.mask_outlines||[]){
+        g.beginPath();
+        poly.forEach(([x,y],i)=>i?g.lineTo(px(y),py(x)):g.moveTo(px(y),py(x)));
+        g.closePath();g.stroke();
+    }
+    document.querySelector('#near-caption').textContent='圈距 10 cm'+(Number.isInteger(frame?.cluster_hits)?' · 黄框滤除 '+frame.cluster_hits+' 点':'');
+}
+
+function drawRoute(route,trail,pose) {
+    const status=document.querySelector('#route-status');
+    if (!route) {status.textContent='下一步 · 等待导航目标';return;}
+    const points=route.points||[], goal=route.goal;
+    const blocked=/受阻|拒绝|没有可用|暂停/.test(route.status);
+    let line='下一步 · '+route.action+' · '+route.status;
+    ctx.save();
+    const draw=(path,color,width,dash)=>{
+        if(path.length<2)return;
+        ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.beginPath();
+        path.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.stroke();
+    };
+    draw(trail||[],'#14866d',.012,[.018,.012]);
+    const color=blocked?'#bd5708':'#195ec4';
+    draw(points,color,.013,blocked?[.035,.022]:[]);
+    if(goal){
+        const [x,y,a]=goal;ctx.setLineDash([]);ctx.lineWidth=.009;ctx.strokeStyle=color;
+        ctx.beginPath();ctx.arc(x,y,.032,0,2*Math.PI);ctx.moveTo(x,y);
+        ctx.lineTo(x+.065*Math.cos(a),y+.065*Math.sin(a));ctx.stroke();
+        line+=' · 目标 ('+x.toFixed(2)+', '+y.toFixed(2)+') m';
+        if(pose)line+=' · 估计距目标 '+(100*Math.hypot(x-pose[0],y-pose[1])).toFixed(0)+' cm';
+    }
+    if(points.length>1 && pose){
+        let d=Infinity;
+        for(let i=1;i<points.length;i++){
+            const [x,y]=points[i-1],[u,v]=points[i],dx=u-x,dy=v-y;
+            const t=Math.min(1,Math.max(0,((pose[0]-x)*dx+(pose[1]-y)*dy)/(dx*dx+dy*dy||1)));
+            d=Math.min(d,Math.hypot(pose[0]-x-t*dx,pose[1]-y-t*dy));
+        }
+        line+=' · 估计距路径 '+(100*d).toFixed(0)+' cm';
+    }
+    ctx.restore();status.textContent=line;
+}
+
+function redraw(){
+    drawNearField();
+    const ratio = devicePixelRatio || 1, w = canvas.clientWidth * ratio, h = canvas.clientHeight * ratio;
+    if (!w || !h) return;
+    canvas.width = w; canvas.height = h;
+    if (!frame || !frame.map) return;
+    const m = frame.map, [ox, oy, theta] = m.origin, c = Math.cos(theta), s = Math.sin(theta);
+    const sx = m.width * m.resolution, sy = m.height * m.resolution;
+    const corners = [[ox,oy],[ox+c*sx,oy+s*sx],[ox-s*sy,oy+c*sy],[ox+c*sx-s*sy,oy+s*sx+c*sy]];
+    const xs = corners.map(p=>p[0]), ys = corners.map(p=>p[1]);
+    const lowX=Math.min(...xs), highX=Math.max(...xs), lowY=Math.min(...ys), highY=Math.max(...ys);
+    const k=Math.min(w/(highX-lowX+.45),h/(highY-lowY+.45));
+    const centerX=(highX+lowX)/2, centerY=(highY+lowY)/2;
+    transform = {ratio, k, x:w/2-centerX*k, y:h/2+centerY*k};
+    ctx.setTransform(k,0,0,-k,w/2-centerX*k,h/2+centerY*k);
+    if (cached !== m.pixels || layer.width !== m.width || layer.height !== m.height) {
+        layer.width=m.width;layer.height=m.height;cached=m.pixels;
+        const img=layerCtx.createImageData(m.width,m.height);
+        cells=atob(m.pixels);
+        for(let i=0;i<cells.length;i++){
+            const v=cells.charCodeAt(i), shade=v>100?133:v>=65?22:255-Math.round(v*1.7);
+            img.data.set([shade,shade,shade,255],i*4);
+        }
+        layerCtx.putImageData(img,0,0);
+    }
+    ctx.save();ctx.translate(ox,oy);ctx.rotate(theta);ctx.imageSmoothingEnabled=false;
+    ctx.drawImage(layer,0,0,sx,sy);ctx.restore();
+    drawOfficialZones(m, cells, k, ratio);
+    const aisle=frame.field?.centerline;
+    if(aisle){
+        ctx.save();ctx.strokeStyle='#22616f';ctx.lineWidth=.012;ctx.setLineDash([.035,.025]);
+        ctx.beginPath();ctx.moveTo(aisle.entry_x,aisle.y);ctx.lineTo(aisle.end_x,aisle.y);ctx.stroke();
+        ctx.restore();
+    }
+    const size=frame.field?.rack_size;
+    if(size) for(const [x,y,a] of frame.mission?.placed || []){
+        ctx.save();ctx.translate(x,y);ctx.rotate(a);
+        ctx.fillStyle='#265f55';ctx.fillRect(-size[0]/2,-size[1]/2,size[0],size[1]);ctx.restore();
+    }
+    ctx.fillStyle='#ff524c';
+    const raw=document.querySelector('#show-raw').checked;
+    const samples=raw?frame.raw:frame.filtered;
+    document.querySelector('#scan-options').hidden=!frame.monitor;
+    const sameScan=frame.scan_pose && Array.isArray(samples);
+    let points=raw && frame.monitor ? [] : frame.points;
+    if(sameScan){
+        const [bx,by,a]=frame.scan_pose, cos=Math.cos(a), sin=Math.sin(a);
+        points=samples.map(([u,v])=>[bx+cos*u-sin*v,by+sin*u+cos*v]);
+    }
+    const shownPose=sameScan?frame.scan_pose:frame.pose;
+    const history=shownPose?null:frame.last_map_fix;
+    drawRoute(frame.route,frame.pose_trail,frame.pose);
+    document.querySelector('#map-source').textContent=shownPose?
+        (frame.wall_preview && sameScan?'实测雷达 · 围墙估计预览（起点侧初始化）':'实测雷达 · 地图定位'):
+        history?'上次定位 · '+history.age_s.toFixed(1)+' 秒前 · 等待当前墙面确认':
+        (samples?.length?'雷达已连接 · 等待可确认的墙面位置':'官方底图 · 等待实时数据');
+    const count=Number.isInteger(frame.body_hits)?' · 已过滤 '+frame.body_hits+' 点'+(Number.isInteger(frame.isolated_hits)?'（单束孤点 '+frame.isolated_hits+'）':''):'';
+    document.querySelector('#radar-caption').textContent=(raw?'原始':'过滤后')+' '+(samples?.length||0)+' 点'+count+
+        (points.length?' · 已叠加':(samples?.length?' · 等待扫描时刻定位':' · 等待雷达'));
+    for(const [x,y] of points)ctx.fillRect(x-.006,y-.006,.012,.012);
+    const observations=shownPose && frame.observations;
+    if(observations && !raw){
+        ctx.strokeStyle='#e85c53';ctx.lineWidth=.009;ctx.beginPath();
+        for(const segment of observations.wall_segments){
+            ctx.moveTo(...segment.ends[0]);ctx.lineTo(...segment.ends[1]);
+        }
+        ctx.stroke();
+        ctx.strokeStyle='#a440cf';ctx.lineWidth=.008;
+        for(const [x,y] of observations.leg_candidates){
+            ctx.beginPath();ctx.arc(x,y,.022,0,2*Math.PI);ctx.stroke();
+        }
+        for(const rack of observations.measured_racks){
+            ctx.beginPath();rack.legs.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));
+            ctx.closePath();ctx.stroke();
+        }
+    }
+    for(const rack of frame.racks || []){
+        ctx.strokeStyle='#a440cf';ctx.fillStyle='#a440cf';ctx.lineWidth=.009;
+        for(const [x,y] of rack.legs){
+            ctx.beginPath();ctx.arc(x,y,.028,0,2*Math.PI);ctx.stroke();
+            if(rack.confirmed) ctx.fill();
+        }
+    }
+    for(const [x,y] of frame.mission?.target_legs || []){
+        ctx.fillStyle='#742abb';ctx.beginPath();ctx.arc(x,y,.033,0,2*Math.PI);ctx.fill();
+    }
+    if(target){
+        const [x,y]=target;
+        ctx.lineWidth=.018;ctx.strokeStyle='#1875cd';
+        ctx.beginPath();ctx.arc(x,y,.065,0,2*Math.PI);ctx.stroke();
+    }
+    if (shownPose || history){
+        const [x,y,a]=shownPose || history.pose;
+        ctx.save();ctx.translate(x,y);ctx.rotate(a);
+        ctx.strokeStyle='#12303a';ctx.fillStyle='#5ef3dc';ctx.lineWidth=.012;
+        ctx.beginPath();ctx.moveTo(.16,0);ctx.lineTo(-.09,.08);ctx.lineTo(-.09,-.08);ctx.closePath();
+        if(history){ctx.setLineDash([.02,.014]);ctx.strokeStyle='#697780';}else{ctx.fill();}
+        ctx.stroke();ctx.restore();
+    }
+    scaleLabel.textContent='1 米 ≈ '+Math.round(k/ratio)+' 像素';
+}
+
+function updatePreview(s){
+    const panel=document.querySelector('#preview'), img=document.querySelector('#camera-image');
+    panel.hidden=!s?.monitor;
+    const live=Boolean(s?.camera_live);
+    if(live && !img.hasAttribute('src')) img.src='/camera.mjpg';
+    if(!live && img.hasAttribute('src')) img.removeAttribute('src');
+    img.hidden=!live;
+    document.querySelector('#camera-wait').hidden=live;
+    const sources=s?.sources || {};
+    const describe=key=>!(key in sources)?'等待数据':sources[key]>1.0?
+        sources[key].toFixed(1)+' 秒未更新':'在线';
+    document.querySelector('#sensor-health').textContent='相机 '+(live?(s.camera_hz==null?'在线':s.camera_hz.toFixed(1)+' Hz'):'等待 /camera/image_raw')+
+        '　雷达 '+describe('scan')+'　底盘 '+describe('chassis')+'　里程计 '+describe('odom');
+    const loc=document.querySelector('#localization-health');
+    loc.textContent=s?.localization || s?.alignment ||
+        (s?.wall_preview?'围墙估计仅用于显示':s?.scan_pose || s?.pose?'地图定位可用':'等待地图定位');
+    if(s?.pose && !s.wall_preview && s.observations?.wall_segments?.length){
+        const walls=new Map();
+        for(const seg of s.observations.wall_segments){
+            const [[x,y],[u,v]]=seg.ends, span=Math.hypot(x-u,y-v);
+            if(!walls.has(seg.wall) || span>walls.get(seg.wall).span)walls.set(seg.wall,{span,offset:seg.offset});
+        }
+        loc.textContent+=' · 雷达墙线到图上墙面 '+Array.from(walls,([name,w])=>name+' '+(Math.abs(w.offset)*100).toFixed(1)+' cm').join('，');
+    }
+}
+document.querySelector('#camera-image').addEventListener('error',e=>e.currentTarget.removeAttribute('src'));
+
+async function refresh(){
+    try {
+        const response = await fetch('/state', {signal: AbortSignal.timeout(1800)});
+        if (!response.ok) throw new Error(response.status);
+        frame=await response.json();online=!!frame.drive;
+        status.textContent=frame.map ? frame.status : '等待 /map';
+        updatePreview(frame);
+        redraw();
+    } catch {
+        online=false;
+        updatePreview({monitor:frame?.monitor});
+        status.textContent='连接中断，检查 SSH 和树莓派建图网页';
+        if (frame) { frame.points=[]; frame.pose=null; frame.racks=[]; frame.raw=[]; frame.filtered=[]; frame.scan_pose=null; frame.wall_preview=null; frame.last_map_fix=null; frame.route=null;frame.pose_trail=[]; delete frame.isolated_hits; delete frame.observations; delete frame.body_hits; delete frame.cluster_hits; redraw(); }
+    } finally {
+        updateControls();
+        setTimeout(refresh,300);
+    }
+}
+function updateControls(){
+    const mode=online ? frame.mode : 'stop';
+    const mission=online ? (frame.mission || {}) : {};
+    const active=mode==='race' || mode==='stopping';
+    const hardware=frame?.chassis?.state==='ready' && frame.gate_ready;
+    const [,sx,sy,sw,sh]=officialZones[0];
+    const inStart=frame?.pose && frame.pose[0]>=sx && frame.pose[0]<=sx+sw &&
+        frame.pose[1]>=sy && frame.pose[1]<=sy+sh;
+    for(const b of commands){
+        const op=b.dataset.op;
+        b.disabled=!online || (b.dataset.hold && mode!=='manual') ||
+            ((op==='manual' || op==='nav') && (!hardware || active || frame.field_used)) ||
+            (op==='nav' && (!frame.nav_available || !frame.pose)) ||
+            (op==='goal' && (mode!=='nav' || !target || !frame.pose)) ||
+            (op==='race' && (!hardware || mode!=='stop' || !frame.match_configured ||
+                 !frame.nav_available || !inStart || frame.field_used)) ||
+            (op==='confirm' && (mode!=='race' || mission.state!=='confirm'));
+    }
+    drive.textContent=online ? frame.drive : '';
+    const labels={waiting_devices:'掉线停车，等待设备恢复',checking:'检查底盘、相机和导航',centerline:'前往中轴通道',survey:'雷达查找四条架腿',approach:'驶向货架',align:'雷达对准架腿',
+        insert:'进入货架',lifting:'举升中',carry:'载货驶向 END',place:'驶向卸货位',
+        lowering:'落架中',retreat:'登记落架并倒退退出',finish_scan:'前往 END 做最终扫码',
+        done:'比赛结束',failed:'比赛停止'};
+    let message=labels[mission.state] || (online ?
+        (frame.match_configured ? '等待开始' : '未加载实车比赛配置') : frame?.monitor?'雷达监看':'离线预览');
+    if(online && frame.pose && !inStart && !mission.state) message='比赛需从蓝色 START 区发车';
+    if(mission.state==='scan') message='已停车，等待'+(mission.expected==='END' && !mission.rack?'最终':'')+'扫码 '+mission.expected;
+    if(mission.state==='confirm') message=mission.lift_up?'等待确认货架已离地':'等待确认货架已落稳';
+    if(mission.servo_accepted) message+=' · 舵机已接受 '+mission.angle_deg+'° 目标';
+    if(mission.reason) message+=' · '+mission.reason;
+    if(active && mission.carrying && mission.state!=='carry') message='载架 · '+message;
+    phase.textContent=message;
+    clock.textContent=mission.remaining==null?'':`剩余 ${mission.remaining} 秒`;
+    const sequence=mission.order || frame?.field?.order || [];
+    order.hidden=!sequence.length;
+    order.textContent=sequence.map((r,i)=>'P'+(i+1)+' '+r+
+        (mission.completed?.includes(r)?' ✓':r===mission.rack?'（进行中）':'')).join(' → ');
+    confirm.hidden=mission.state!=='confirm' || mode!=='race';
+    confirm.textContent=mission.lift_up?'确认货架已离地':'确认货架已落稳';
+    const chassis=frame?.chassis;
+    document.querySelector('#chassis').textContent=online && chassis?.text ?
+        chassis.text+(chassis.port?' · '+chassis.port:'') :
+        online ? '树莓派正在使用旧版网页后端' : frame?.monitor && frame.sources?.chassis<=1 && frame.base_status?'只读监看 · '+frame.base_status:frame?.monitor?'只读监看 · 控制指令关闭':'连接树莓派后可查看 ESP32 状态';
+    const position=frame?.scan_pose || frame?.pose;
+    document.querySelector('#pose').textContent=position ?
+        `车体 (${position[0].toFixed(2)}, ${position[1].toFixed(2)}) m  ·  ${(position[2]*180/Math.PI).toFixed(1)}°  ` :
+        frame?.last_map_fix?'虚线箭头为上次确认位置  ':'定位不可用  ';
+    document.querySelector('#wall').textContent=online ? frame.alignment : '';
+    document.querySelector('#racks').textContent=frame?.observations && (frame?.pose || frame?.scan_pose)?
+        ' · 候选腿 '+Object.entries(frame.observations.reference_hits||{}).map(([name,n])=>name+' '+n+'/4').join('　')+' · 紫框：实测四腿 '+frame.observations.measured_racks.length+' 组　'+frame.observations.measured_racks.filter(r=>r.near_zone).map(r=>r.near_zone+' 中心偏差 '+(100*r.offset_m).toFixed(1)+' cm').join('　'):frame?.racks?.map(r=>`${r.name} ${r.legs.length}/4${r.confirmed?'（几何吻合）':''}`).join('　') || '';
+}
+async function send(op, data={}){
+    try {
+        const response=await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json','X-DASE-GUI':'1'},
+            body:JSON.stringify({op,...data}),signal:AbortSignal.timeout(500)});
+        if(!response.ok) throw Error();
+    } catch {drive.textContent='指令连接中断';}
+}
+for(const b of commands){
+    if(b.dataset.op) b.addEventListener('click',()=>{
+        const op=b.dataset.op;
+        if(op==='confirm' && frame?.mission?.token) send(op,{token:frame.mission.token});
+        else if(op==='goal' && target) send(op,{x:target[0],y:target[1]});
+        else if(op!=='goal'){target=null;send(op);}
+    });
+    if(b.dataset.hold){
+        b.addEventListener('pointerdown',e=>{b.setPointerCapture(e.pointerId);hold=b.dataset.hold;send(hold);});
+        for(const event of ['pointerup','pointercancel','lostpointercapture'])
+            b.addEventListener(event,()=>{if(hold===b.dataset.hold){hold=null;send('release');}});
+    }
+}
+canvas.addEventListener('click',e=>{
+    if(!online || frame.mode!=='nav' || !transform) return;
+    const {ratio,k,x,y}=transform;
+    const goal=[(e.offsetX*ratio-x)/k, (y-e.offsetY*ratio)/k];
+    if(goal[0]>.12 && goal[0]<2.90 && goal[1]>.12 && goal[1]<1.88) target=goal;
+    updateControls();redraw();
+});
+setInterval(()=>{
+    if(document.hidden || !online) return;
+    if(frame.mode==='manual' || frame.mode==='nav' || frame.mode==='race') send('heartbeat');
+    if(hold && frame.mode==='manual') send(hold);
+},145);
+window.addEventListener('blur',()=>{hold=null;if(online && ['manual','nav'].includes(frame.mode)) send('stop');});
+document.querySelector('#show-raw').addEventListener('change',redraw);
+window.addEventListener('resize', redraw);
+updateControls();
+refresh();
+</script>
+</html>
